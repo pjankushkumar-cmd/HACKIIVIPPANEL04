@@ -180,6 +180,58 @@
     }
     /* Real HACKIE PANEL authentication is provided by server.js. */
     /* Do not seed a session here; the login form sets it only after server validation. */
+
+    var EF_MODES = {
+      "30S": { seconds: 30, code: 10005 },
+      "1M": { seconds: 60, code: 10001 },
+      "3M": { seconds: 180, code: 10002 },
+      "5M": { seconds: 300, code: 10003 }
+    };
+    function efHash(str) {
+      var h = 2166136261 >>> 0;
+      for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+      h ^= h >>> 13; h = Math.imul(h, 0x5bd1e995); h ^= h >>> 15;
+      return h >>> 0;
+    }
+    function efPeriodAt(mode, ts) {
+      var m = EF_MODES[mode] || EF_MODES["1M"], n = new Date(ts);
+      var date = n.getUTCFullYear().toString() +
+        String(n.getUTCMonth() + 1).padStart(2, "0") +
+        String(n.getUTCDate()).padStart(2, "0");
+      var secs = n.getUTCHours() * 3600 + n.getUTCMinutes() * 60 + n.getUTCSeconds();
+      var idx = Math.floor(secs / m.seconds) + 1;
+      return date + m.code + String(idx).padStart(4, "0");
+    }
+    function efHistory(mode) {
+      var m = EF_MODES[mode] || EF_MODES["1M"], now = Date.now(), out = [];
+      for (var i = 10; i >= 1; i--) {
+        var period = efPeriodAt(mode, now - i * m.seconds * 1000);
+        var number = efHash(mode + ":" + period) % 10;
+        out.push({ period: period, number: number, side: number >= 5 ? "B" : "S" });
+      }
+      return out;
+    }
+    function efJson(v) {
+      return new Response(JSON.stringify(v), {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+      });
+    }
+    function efUrlOf(input) {
+      try { return typeof input === "string" ? input : (input && input.url) || String(input); }
+      catch (e) { return ""; }
+    }
+    function efModeFrom(text) {
+      var m = /WinGo_(30S|1M|3M|5M)/.exec(text);
+      if (m) return m[1];
+      try {
+        var dec = decodeURIComponent(text);
+        m = /"s"\s*:\s*"(30S|1M|3M|5M)"/.exec(dec) || /\b(30S|1M|3M|5M)\b/.exec(dec);
+        if (m) return m[1];
+      } catch (e) {}
+      return "1M";
+    }
+
     var LOGIN_FN = "f04b2e7376c965a2646e35e6acf2f69b54fe8d2697f8788783f38ca126689ab8";
     var HISTORY_FN = "d1d32064523d7a6f87f782848ef8f27e8419d17b147bbca87ef6a4f8ede3fd12";
     var __nativeFetch = (typeof window.fetch === "function") ? window.fetch.bind(window) : null;
@@ -520,7 +572,7 @@ body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
   });
   verify();
   window.setInterval(verify,3000);
-  window.setInterval(function(){fetch('/api/heartbeat',{method:'POST',credentials:'same-origin',cache:'no-store'}).catch(function(){});},10000);
+  window.setInterval(function(){if(authenticated)fetch('/api/heartbeat',{method:'POST',credentials:'same-origin',cache:'no-store'}).catch(function(){});},10000);
   input.focus({preventScroll:true});
 })();
 </script>
