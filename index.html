@@ -494,10 +494,12 @@ body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
   const error=document.getElementById('hackie-auth-error');
   if(!gate||!form)return;
   document.documentElement.style.overflow='hidden';
+  let authenticated=false;
   async function verify(){
     try{
       const r=await fetch('/api/session',{credentials:'same-origin',cache:'no-store'});
-      if(r.ok){gate.remove();document.documentElement.style.overflow='';}
+      if(r.ok){authenticated=true;gate.remove();document.documentElement.style.overflow='';}
+      else if(authenticated){location.reload();}
     }catch(e){}
   }
   form.addEventListener('submit',async function(ev){
@@ -506,13 +508,15 @@ body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
       const r=await fetch('/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:input.value})});
       const data=await r.json().catch(()=>({}));
       if(!r.ok||!data.ok){error.textContent=data.error||'Invalid key. Please try again.';input.value='';input.focus();return;}
-      try{localStorage.setItem('eagle-fly:session',JSON.stringify({role:'admin',at:Date.now()}));}catch(e){}
+      try{localStorage.setItem('eagle-fly:session',JSON.stringify({role:'member',at:Date.now()}));}catch(e){}
       gate.remove();document.documentElement.style.overflow='';
       location.reload();
     }catch(e){error.textContent='Server connection failed. Please try again.';}
     finally{btn.disabled=false;btn.textContent='START';}
   });
   verify();
+  window.setInterval(verify,3000);
+  window.setInterval(function(){fetch('/api/heartbeat',{method:'POST',credentials:'same-origin',cache:'no-store'}).catch(function(){});},10000);
   input.focus({preventScroll:true});
 })();
 </script>

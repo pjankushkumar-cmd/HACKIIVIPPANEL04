@@ -1,97 +1,38 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-const PORT = Number(process.env.PORT || 3000);
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const SESSION_TTL = 12 * 60 * 60 * 1000;
-const sessions = new Map();
-const ROOT = __dirname;
-const COOKIE = 'hackie_session';
-
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
-}
-function parseCookies(header='') {
-  const out = {};
-  header.split(';').forEach(part => {
-    const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
-  });
-  return out;
-}
-function send(res, status, body, headers={}) {
-  res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...headers});
-  res.end(JSON.stringify(body));
-}
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk;
-      if (data.length > 8192) { reject(new Error('Request too large')); req.destroy(); }
-    });
-    req.on('end', () => {
-      try { resolve(JSON.parse(data || '{}')); } catch { reject(new Error('Invalid JSON')); }
-    });
-    req.on('error', reject);
-  });
-}
-function sessionFor(req) {
-  const token = parseCookies(req.headers.cookie || '')[COOKIE];
-  const entry = token && sessions.get(token);
-  if (!entry) return null;
-  if (entry.expires < Date.now()) { sessions.delete(token); return null; }
-  entry.expires = Date.now() + SESSION_TTL;
-  return {token, entry};
-}
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (url.pathname === '/api/login' && req.method === 'POST') {
-    if (!ADMIN_KEY) return send(res, 503, {ok:false,error:'ADMIN_KEY is not configured on the server.'});
-    try {
-      const body = await readBody(req);
-      if (typeof body.key !== 'string' || !safeEqual(body.key, ADMIN_KEY)) {
-        return send(res, 401, {ok:false,error:'Invalid access key.'});
-      }
-      const token = crypto.randomBytes(32).toString('hex');
-      sessions.set(token, {created:Date.now(),expires:Date.now()+SESSION_TTL});
-      return send(res, 200, {ok:true}, {
-        'Set-Cookie': `${COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL/1000)}`
-      });
-    } catch {
-      return send(res, 400, {ok:false,error:'Invalid request.'});
-    }
-  }
-  if (url.pathname === '/api/session' && req.method === 'GET') {
-    const session = sessionFor(req);
-    return send(res, session ? 200 : 401, {ok:!!session});
-  }
-  if (url.pathname === '/api/logout' && req.method === 'POST') {
-    const session = sessionFor(req);
-    if (session) sessions.delete(session.token);
-    return send(res, 200, {ok:true}, {'Set-Cookie':`${COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`});
-  }
-  if (url.pathname.startsWith('/api/')) return send(res, 404, {ok:false,error:'Not found'});
-  // Static assets are served from the project root. No public/ directory is used.
-  let pathname = decodeURIComponent(url.pathname);
-  if (pathname === '/') pathname = '/index.html';
-  const file = path.resolve(ROOT, '.' + pathname);
-  if (!file.startsWith(ROOT + path.sep) && file !== path.join(ROOT,'index.html')) {
-    res.writeHead(403); return res.end('Forbidden');
-  }
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404); return res.end('Not found'); }
-    const ext = path.extname(file).toLowerCase();
-    const types = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};
-    res.writeHead(200, {'Content-Type':types[ext] || 'application/octet-stream','Cache-Control':ext==='.html'?'no-store':'public, max-age=3600'});
-    res.end(data);
-  });
+'use strict';
+const http=require('http'),fs=require('fs'),path=require('path'),crypto=require('crypto');
+const PORT=Number(process.env.PORT||3000),ADMIN_KEY=String(process.env.ADMIN_KEY||''),DATA_FILE=path.resolve(process.env.DATA_FILE||path.join(__dirname,'data.json'));
+const ROOT=__dirname,COOKIE='hackie_session',ADMIN_COOKIE='hackie_admin',TTL=12*60*60*1000,ONLINE_MS=45000;
+const sessions=new Map();
+function safeEqual(a,b){const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y)}
+function readData(){try{const d=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'));return{keys:Array.isArray(d.keys)?d.keys:[],members:Array.isArray(d.members)?d.members:[]}}catch{return{keys:[],members:[]}}}
+let data=readData();function save(){fs.mkdirSync(path.dirname(DATA_FILE),{recursive:true});const tmp=DATA_FILE+'.tmp';fs.writeFileSync(tmp,JSON.stringify(data,null,2),{mode:0o600});fs.renameSync(tmp,DATA_FILE)}
+function cookies(req){const o={};for(const p of String(req.headers.cookie||'').split(';')){const i=p.indexOf('=');if(i>0)o[p.slice(0,i).trim()]=decodeURIComponent(p.slice(i+1).trim())}return o}
+function send(res,status,obj,headers={}){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers});res.end(JSON.stringify(obj))}
+function body(req){return new Promise((resolve,reject)=>{let s='';req.on('data',c=>{s+=c;if(s.length>10000){reject(Error('Request too large'));req.destroy()}});req.on('end',()=>{try{resolve(JSON.parse(s||'{}'))}catch{reject(Error('Invalid JSON'))}});req.on('error',reject)})}
+function makeSession(res,role,memberId){const token=crypto.randomBytes(32).toString('hex'),now=Date.now(),cookie=role==='admin'?ADMIN_COOKIE:COOKIE;sessions.set(token,{role,memberId,created:now,lastSeen:now,expires:now+TTL});res.setHeader('Set-Cookie',`${cookie}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${TTL/1000}`)}
+function getSession(req,role){const c=cookies(req),token=c[role==='admin'?ADMIN_COOKIE:COOKIE],s=token&&sessions.get(token);if(!s||s.role!==role||s.expires<Date.now())return null;if(role==='member'){const m=data.members.find(x=>x.id===s.memberId),k=m&&data.keys.find(x=>x.id===m.keyId);if(!m||!k||!k.enabled){sessions.delete(token);return null}m.lastSeen=Date.now();s.lastSeen=Date.now()}else s.lastSeen=Date.now();return{token,...s}}
+function need(role,req,res){const s=getSession(req,role);if(!s){send(res,401,{ok:false,error:'Session expired. Please log in again.'});return null}return s}
+function hash(k,s){return crypto.scryptSync(k,s,64).toString('hex')}function keyMatches(k,r){try{return safeEqual(hash(k,r.salt),r.hash)}catch{return false}}
+function duration(ms){let n=Math.floor(Math.max(0,ms)/1000);return `${Math.floor(n/3600)}h ${Math.floor(n%3600/60)}m ${n%60}s`}
+const adminPage=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HACKIE PANEL ADMIN</title><style>*{box-sizing:border-box}body{margin:0;background:#070611;color:#f5f7ff;font:14px system-ui;padding:18px}.wrap{max-width:1050px;margin:auto}.card{background:#151326;border:1px solid #263b57;border-radius:18px;padding:18px;margin:14px 0}.login{max-width:420px;margin:12vh auto}.hidden{display:none}.field,button{padding:12px;border-radius:10px;border:1px solid #33415e;background:#0c0a19;color:#fff}.field{width:100%;margin:6px 0}.btn{background:linear-gradient(90deg,#078fc2,#00b7ed);border:0;font-weight:800;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.stat{font-size:28px;font-weight:900}.muted{color:#9ba8c3;font-size:12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1;min-width:120px}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:600px}td,th{text-align:left;padding:10px;border-bottom:1px solid #2b3148;font-size:12px}.online{color:#34d399}.offline{color:#fbbf24}.error{color:#fda4af;min-height:20px}.small{padding:7px;margin:2px}.key{color:#7dd3fc;word-break:break-all}@media(max-width:600px){.grid{grid-template-columns:1fr 1fr}body{padding:10px}}</style></head><body><div class="wrap"><section id="login" class="card login"><h2>HACKIE PANEL · ADMIN</h2><p class="muted">ADMINISTRATOR ACCESS</p><form id="loginForm"><input id="adminKey" class="field" type="password" placeholder="Enter ADMIN_KEY" required><button class="btn" style="width:100%">LOGIN</button></form><p id="err" class="error"></p></section><main id="dash" class="hidden"><div class="row"><div><h1>ADMIN CONTROL CENTER</h1><p class="muted">Live member status · refreshes every 5 seconds</p></div><button id="logout">LOG OUT</button></div><div class="grid"><div class="card"><div class="muted">ONLINE</div><div class="stat online" id="on">0</div></div><div class="card"><div class="muted">OFFLINE</div><div class="stat offline" id="off">0</div></div><div class="card"><div class="muted">TOTAL LOGINS</div><div class="stat" id="total">0</div></div></div><section class="card"><h3>CREATE MEMBER KEY</h3><div class="row"><input class="field" id="label" placeholder="Member name"><input class="field" id="newkey" placeholder="Custom key (optional)"></div><button class="btn" id="create">CREATE KEY</button><p id="created" class="key"></p></section><section class="card"><h3>MEMBER ACTIVITY</h3><p class="muted">Online means heartbeat/activity in the last 45 seconds. Activity duration is approximate and depends on active browser sessions.</p><div class="scroll"><table><thead><tr><th>MEMBER</th><th>STATUS</th><th>ACTIVE TIME</th><th>FIRST LOGIN</th><th>LAST SEEN</th></tr></thead><tbody id="members"></tbody></table></div></section><section class="card"><h3>MEMBER KEYS</h3><div class="scroll"><table><thead><tr><th>LABEL</th><th>STATUS</th><th>CREATED</th><th>ACTIONS</th></tr></thead><tbody id="keys"></tbody></table></div></section></main></div><script>
+const $=x=>document.getElementById(x);async function api(u,o={}){let r=await fetch(u,{...o,credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json',...(o.headers||{})}}),d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Request failed');return d}const dt=x=>x?new Date(x).toLocaleString():'—',esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function dur(ms){let s=Math.floor((ms||0)/1000);return Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m'}function show(){ $('login').classList.add('hidden');$('dash').classList.remove('hidden');load();window.__poll=setInterval(load,5000)}function login(msg=''){ $('dash').classList.add('hidden');$('login').classList.remove('hidden');$('err').textContent=msg;if(window.__poll)clearInterval(window.__poll)}async function load(){try{let d=await api('/api/admin/overview');$('on').textContent=d.online;$('off').textContent=d.offline;$('total').textContent=d.total;$('members').innerHTML=d.members.map(m=>'<tr><td>'+esc(m.label)+'</td><td class="'+(m.online?'online':'offline')+'">'+(m.online?'ONLINE':'OFFLINE')+'</td><td>'+dur(m.activeMs)+'</td><td>'+dt(m.firstSeen)+'</td><td>'+dt(m.lastSeen)+'</td></tr>').join('')||'<tr><td colspan="5">No member logins yet</td></tr>';$('keys').innerHTML=d.keys.map(k=>'<tr><td>'+esc(k.label)+'</td><td class="'+(k.enabled?'online':'offline')+'">'+(k.enabled?'ACTIVE':'DISABLED')+'</td><td>'+dt(k.createdAt)+'</td><td><button class="small" data-act="toggle" data-id="'+esc(k.id)+'" data-on="'+(!k.enabled)+'">'+(k.enabled?'DISABLE':'ENABLE')+'</button><button class="small" data-act="delete" data-id="'+esc(k.id)+'">DELETE</button></td></tr>').join('')||'<tr><td colspan="4">No keys created</td></tr>'}catch(e){login(e.message)}}$('loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({key:$('adminKey').value})});$('adminKey').value='';show()}catch(x){$('err').textContent=x.message}};$('create').onclick=async()=>{try{let d=await api('/api/admin/keys',{method:'POST',body:JSON.stringify({label:$('label').value,key:$('newkey').value})});$('created').textContent='Copy this member key now: '+d.key;$('newkey').value='';load()}catch(e){$('created').textContent=e.message}};$('keys').onclick=async e=>{let b=e.target.closest('button[data-act]');if(!b)return;try{if(b.dataset.act==='toggle')await api('/api/admin/keys/'+b.dataset.id,{method:'PATCH',body:JSON.stringify({enabled:b.dataset.on==='true'})});else if(confirm('Delete this key?'))await api('/api/admin/keys/'+b.dataset.id,{method:'DELETE'});load()}catch(x){alert(x.message)}};$('logout').onclick=async()=>{await api('/api/admin/logout',{method:'POST'}).catch(()=>{});login('Logged out')};api('/api/admin/me').then(show).catch(()=>login());
+</script></body></html>`;
+const server=http.createServer(async(req,res)=>{const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname,m=req.method;
+try{
+if(p==='/health')return send(res,200,{ok:true});
+if(p==='/admin'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});return res.end(adminPage)}
+if(p==='/api/login'&&m==='POST'){const b=await body(req),k=String(b.key||'');let rec=data.keys.find(x=>x.enabled&&keyMatches(k,x));if(!rec)return send(res,401,{ok:false,error:'Invalid or disabled access key.'});const id=crypto.randomUUID(),now=Date.now();data.members.push({id,label:rec.label,keyId:rec.id,firstSeen:now,lastSeen:now,totalActiveMs:0});save();makeSession(res,'member',id);return send(res,200,{ok:true})}
+if(p==='/api/session'&&m==='GET'){const s=getSession(req,'member');return send(res,s?200:401,{ok:!!s})}
+if(p==='/api/heartbeat'&&m==='POST'){const s=need('member',req,res);if(!s)return;const member=data.members.find(x=>x.id===s.memberId);if(member){const now=Date.now();member.totalActiveMs=(member.totalActiveMs||0)+Math.min(15000,Math.max(0,now-(member.lastSeen||now)));member.lastSeen=now;save()}return send(res,200,{ok:true})}
+if(p==='/api/logout'&&m==='POST'){const s=getSession(req,'member');if(s)sessions.delete(s.token);res.setHeader('Set-Cookie',`${COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`);return send(res,200,{ok:true})}
+if(p==='/api/admin/login'&&m==='POST'){if(!ADMIN_KEY)return send(res,503,{error:'ADMIN_KEY is not configured in Render Environment.'});const b=await body(req);if(!safeEqual(String(b.key||''),ADMIN_KEY))return send(res,401,{error:'Incorrect admin key.'});makeSession(res,'admin');return send(res,200,{ok:true})}
+if(p==='/api/admin/me'&&m==='GET'){const s=need('admin',req,res);if(!s)return;return send(res,200,{ok:true})}
+if(p==='/api/admin/logout'&&m==='POST'){const s=getSession(req,'admin');if(s)sessions.delete(s.token);res.setHeader('Set-Cookie',`${ADMIN_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`);return send(res,200,{ok:true})}
+if(p==='/api/admin/overview'&&m==='GET'){if(!need('admin',req,res))return;const now=Date.now(),members=data.members.map(x=>{const active=[...sessions.values()].some(s=>s.role==='member'&&s.memberId===x.id&&now-s.lastSeen<ONLINE_MS);return{id:x.id,label:x.label,online:active,firstSeen:x.firstSeen,lastSeen:x.lastSeen,activeMs:(x.totalActiveMs||0)+(active?Math.min(15000,now-x.lastSeen):0)}});return send(res,200,{online:members.filter(x=>x.online).length,offline:members.filter(x=>!x.online).length,total:members.length,members,keys:data.keys.map(({id,label,enabled,createdAt})=>({id,label,enabled,createdAt}))})}
+if(p==='/api/admin/keys'&&m==='POST'){if(!need('admin',req,res))return;const b=await body(req),label=String(b.label||'Member').trim().slice(0,60)||'Member',key=String(b.key||crypto.randomBytes(15).toString('base64url')).trim();if(key.length<6||key.length>180)return send(res,400,{error:'Member key must be 6–180 characters.'});if(data.keys.some(x=>keyMatches(key,x)))return send(res,409,{error:'Key already exists.'});const salt=crypto.randomBytes(16).toString('hex');data.keys.push({id:crypto.randomUUID(),label,salt,hash:hash(key,salt),enabled:true,createdAt:Date.now()});save();return send(res,200,{ok:true,key})}
+if(p.startsWith('/api/admin/keys/')&&(m==='PATCH'||m==='DELETE')){if(!need('admin',req,res))return;const id=p.split('/').pop(),rec=data.keys.find(x=>x.id===id);if(!rec)return send(res,404,{error:'Key not found.'});if(m==='PATCH'){const b=await body(req);if(typeof b.enabled==='boolean')rec.enabled=b.enabled;if(typeof b.label==='string')rec.label=b.label.slice(0,60);save();}else{data.keys=data.keys.filter(x=>x.id!==id);save()}return send(res,200,{ok:true})}
+if(p.startsWith('/api/'))return send(res,404,{ok:false,error:'Not found'});
+let pathname=decodeURIComponent(p);if(pathname==='/')pathname='/index.html';const file=path.resolve(ROOT,'.'+pathname);if(!file.startsWith(ROOT+path.sep)&&file!==path.join(ROOT,'index.html')){res.writeHead(403);return res.end('Forbidden')}fs.readFile(file,(err,buf)=>{if(err){res.writeHead(404);return res.end('Not found')}const ext=path.extname(file).toLowerCase(),types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};res.writeHead(200,{'Content-Type':types[ext]||'application/octet-stream','Cache-Control':ext==='.html'?'no-store':'public, max-age=3600'});res.end(buf)})
+}catch(e){console.error(e);if(!res.headersSent)send(res,500,{error:'Internal server error'})}
 });
-server.listen(PORT, () => {
-  console.log(`HACKIE PANEL running on port ${PORT}`);
-  if (!ADMIN_KEY) console.warn('WARNING: ADMIN_KEY is missing. Login is disabled until configured.');
-});
+server.listen(PORT,'0.0.0.0',()=>console.log(`HACKIE PANEL listening on ${PORT}; admin: /admin`));
