@@ -185,6 +185,10 @@
     var __nativeFetch = (typeof window.fetch === "function") ? window.fetch.bind(window) : null;
     window.fetch = function (input, init) {
       var url = efUrlOf(input);
+      /* Real authentication APIs must bypass the offline/demo fetch mocks. */
+      if (__nativeFetch && /\/api\//.test(url)) {
+        return __nativeFetch(input, init);
+      }
       try {
         if (url.indexOf("draw.ar-lottery01.com") !== -1 || url.indexOf("GetHistoryIssuePage.json") !== -1) {
           var h = efHistory(efModeFrom(url));
@@ -511,7 +515,7 @@ body{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
       try{localStorage.setItem('eagle-fly:session',JSON.stringify({role:'member',at:Date.now()}));}catch(e){}
       gate.remove();document.documentElement.style.overflow='';
       location.reload();
-    }catch(e){error.textContent='Server connection failed. Please try again.';}
+    }catch(e){error.textContent='Connection error: '+(e&&e.message?e.message:'Network request failed')+'. Check /health and Render Web Service logs.';}
     finally{btn.disabled=false;btn.textContent='START';}
   });
   verify();
